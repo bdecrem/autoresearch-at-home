@@ -84,6 +84,29 @@ best/metadata        stats for the global best
 leaderboard          rankings
 ```
 
+## Apple Silicon (MPS) support
+
+`train.py` and `prepare.py` auto-detect the device: CUDA GPUs use FA3 kernels with bfloat16 and `torch.compile`; Apple Silicon Macs use PyTorch's native `F.scaled_dot_product_attention` in float32.
+
+**Prerequisites:**
+- macOS with Apple Silicon (M1/M2/M3/M4) and at least 16GB unified memory
+- Python 3.10+, PyTorch 2.1+ (with MPS backend)
+
+**How to run:**
+```bash
+uv sync           # install deps (kernels package is CUDA-only, will be skipped on Mac)
+uv run prepare.py # download data + train tokenizer
+uv run train.py   # auto-detects MPS, uses DEVICE_BATCH_SIZE=4
+```
+
+**What differs on MPS:**
+- Batch size: 4 (vs 64 on CUDA) — fits in 16GB unified memory
+- Total batch: 16K tokens (vs 524K) with gradient accumulation
+- Eval tokens: 10x524K (vs 40x524K) for faster eval
+- No `torch.compile` (limited MPS backend support)
+- float32 everywhere (MPS bfloat16 is unstable)
+- Expected val_bpb ~1.9 after 5 minutes on M4 Max
+
 ## License
 
 MIT
