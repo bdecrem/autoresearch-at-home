@@ -105,7 +105,11 @@ uv run train.py   # auto-detects MPS, uses DEVICE_BATCH_SIZE=4
 - Eval tokens: 10x524K (vs 40x524K) for faster eval
 - No `torch.compile` (limited MPS backend support)
 - float32 everywhere (MPS bfloat16 is unstable)
-- Expected val_bpb ~1.9 after 5 minutes on M4 Max
+**Benchmark (Mac mini M4, 10-core GPU, 16GB unified memory):**
+- 100 steps in ~340 seconds (~3.4s/step)
+- Loss: 9.01 → 5.33
+- Throughput: ~4,800 tok/sec
+- ~100x slower than H100 (inherent hardware gap — no FA3, no torch.compile)
 
 ## License
 
