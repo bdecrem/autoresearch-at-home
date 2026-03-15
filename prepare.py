@@ -273,6 +273,15 @@ def _document_batches(split, tokenizer_batch_size=128):
         epoch += 1
 
 
+def _detect_device():
+    """Detect best available device for data loading."""
+    if torch.backends.mps.is_available():
+        return "mps"
+    elif torch.cuda.is_available():
+        return "cuda"
+    return "cpu"
+
+
 def make_dataloader(tokenizer, B, T, split, buffer_size=1000):
     """
     BOS-aligned dataloader with best-fit packing.
@@ -281,6 +290,7 @@ def make_dataloader(tokenizer, B, T, split, buffer_size=1000):
     100% utilization (no padding).
     """
     assert split in ["train", "val"]
+    device_type = _detect_device()
     row_capacity = T + 1
     batches = _document_batches(split)
     bos_token = tokenizer.get_bos_token_id()
@@ -295,8 +305,9 @@ def make_dataloader(tokenizer, B, T, split, buffer_size=1000):
 
     # Pre-allocate buffers: [inputs (B*T) | targets (B*T)]
     row_buffer = torch.empty((B, row_capacity), dtype=torch.long)
-    cpu_buffer = torch.empty(2 * B * T, dtype=torch.long, pin_memory=True)
-    gpu_buffer = torch.empty(2 * B * T, dtype=torch.long, device="cuda")
+    use_pin_memory = device_type == "cuda"
+    cpu_buffer = torch.empty(2 * B * T, dtype=torch.long, pin_memory=use_pin_memory)
+    gpu_buffer = torch.empty(2 * B * T, dtype=torch.long, device=device_type)
     cpu_inputs = cpu_buffer[:B * T].view(B, T)
     cpu_targets = cpu_buffer[B * T:].view(B, T)
     inputs = gpu_buffer[:B * T].view(B, T)
@@ -349,7 +360,7 @@ def evaluate_bpb(model, tokenizer, batch_size):
     are excluded from both sums.
     Uses fixed MAX_SEQ_LEN so results are comparable across configs.
     """
-    token_bytes = get_token_bytes(device="cuda")
+    token_bytes = get_token_bytes(device=_detect_device())
     val_loader = make_dataloader(tokenizer, batch_size, MAX_SEQ_LEN, "val")
     steps = EVAL_TOKENS // (batch_size * MAX_SEQ_LEN)
     total_nats = 0.0
