@@ -526,7 +526,7 @@ HEAD_DIM = 128          # target head dimension for attention
 WINDOW_PATTERN = "SSSL" # sliding window pattern: L=full, S=half context
 
 # Optimization
-TOTAL_BATCH_SIZE = 2**19 if USE_CUDA else 2**14
+TOTAL_BATCH_SIZE = 2**19 if USE_CUDA else 2**16
 EMBEDDING_LR = 0.6      # learning rate for token embeddings (Adam)
 UNEMBEDDING_LR = 0.004  # learning rate for lm_head (Adam)
 MATRIX_LR = 0.04        # learning rate for matrix parameters (Muon)
@@ -539,7 +539,7 @@ FINAL_LR_FRAC = 0.0     # final LR as fraction of initial
 
 # Model size
 DEPTH = 8               # number of transformer layers
-DEVICE_BATCH_SIZE = 64 if USE_CUDA else 4  # 64 for GPU VRAM, 4 for 16GB unified memory
+DEVICE_BATCH_SIZE = 64 if USE_CUDA else 8  # 64 for GPU VRAM, 8 for 16GB unified memory
 
 # ---------------------------------------------------------------------------
 # Setup: tokenizer, model, optimizer, dataloader
@@ -601,6 +601,12 @@ optimizer = model.setup_optimizer(
 
 if USE_CUDA:
     model = torch.compile(model, dynamic=False)
+elif USE_MPS:
+    try:
+        model = torch.compile(model, dynamic=False, backend="aot_eager")
+        print("torch.compile: enabled (aot_eager backend for MPS)")
+    except Exception as e:
+        print(f"torch.compile: skipped on MPS ({e})")
 
 train_loader = make_dataloader(tokenizer, DEVICE_BATCH_SIZE, MAX_SEQ_LEN, "train")
 x, y, epoch = next(train_loader)  # prefetch first batch
@@ -713,6 +719,8 @@ total_tokens = step * TOTAL_BATCH_SIZE
 
 # Final eval
 model.eval()
+if USE_MPS:
+    torch.mps.empty_cache()
 if USE_CUDA:
     with autocast_ctx:
         val_bpb = evaluate_bpb(model, tokenizer, DEVICE_BATCH_SIZE)
@@ -723,7 +731,12 @@ else:
 t_end = time.time()
 startup_time = t_start_training - t_start
 steady_state_mfu = 100 * num_flops_per_token * TOTAL_BATCH_SIZE * (step - 10) / total_training_time / H100_BF16_PEAK_FLOPS if total_training_time > 0 else 0
-peak_vram_mb = torch.cuda.max_memory_allocated() / 1024 / 1024 if USE_CUDA else 0
+if USE_CUDA:
+    peak_vram_mb = torch.cuda.max_memory_allocated() / 1024 / 1024
+elif USE_MPS:
+    peak_vram_mb = torch.mps.driver_allocated_memory() / 1024 / 1024
+else:
+    peak_vram_mb = 0
 
 print("---")
 print(f"val_bpb:          {val_bpb:.6f}")

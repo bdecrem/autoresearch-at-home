@@ -114,11 +114,14 @@ def _experiment_hash(description: str) -> str:
 
 
 def detect_vram_gb() -> Optional[float]:
-    """Detect total VRAM of the current CUDA device in GB. Returns None if unavailable."""
+    """Detect total VRAM/unified memory in GB. Supports CUDA and Apple Silicon MPS."""
     try:
         import torch
         if torch.cuda.is_available():
             return torch.cuda.get_device_properties(0).total_memory / (1024 ** 3)
+        if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+            # Apple Silicon uses unified memory — report total system RAM
+            return os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES") / (1024 ** 3)
     except Exception:
         pass
     return None
