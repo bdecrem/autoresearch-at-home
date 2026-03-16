@@ -232,8 +232,10 @@ def run_cycle(coord, cycle_num, mode, best_bpb, best_source):
         if tweak_info:
             insight = f"{tweak_info['param']} {tweak_info['old']}->{tweak_info['new']}: "
             insight += f"val_bpb={val_bpb:.6f} ({status}). "
-            if status == "keep":
+            if status == "keep" and best_bpb is not None:
                 insight += f"Improved by {best_bpb - val_bpb:.6f} on M4 MPS (~33 steps/5min)."
+            elif status == "keep":
+                insight += f"New baseline on M4 MPS (~33 steps/5min)."
             else:
                 insight += f"No improvement on M4 MPS (~33 steps/5min)."
             coord.post_insight(insight)
@@ -278,6 +280,17 @@ def main():
     cycle = 1
     results = []
     best_bpb = None
+
+    # In search mode, run one baseline first to establish best_bpb
+    if args.mode == "search":
+        print("[search] Running baseline to establish starting score...")
+        result, winning_source = run_cycle(coord, 0, "baseline", None, best_source)
+        results.append(result)
+        if result.get("val_bpb") is not None:
+            best_bpb = result["val_bpb"]
+            print(f"[search] Baseline score: {best_bpb:.6f} — now searching for improvements")
+        else:
+            print("[search] Baseline failed, starting search without reference score")
 
     try:
         while True:
