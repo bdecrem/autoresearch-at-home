@@ -18,6 +18,7 @@ AGENTS.md
 
 # Experimental code/artifacts
 dev/
+_train_experiment.py
 
 # Results file
 results.tsv

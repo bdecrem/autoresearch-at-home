@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Hyperparameter search swarm loop: adopt best → tweak → train → publish → repeat.
+Hyperparameter search swarm loop: tweak → train → publish → repeat.
 
 Usage:
     uv run python run_swarm.py [--cycles N] [--agent-id NAME] [--mode baseline|search]
@@ -9,18 +9,13 @@ Modes:
   baseline  — run the current train.py config repeatedly (no changes)
   search    — vary one hyperparameter per cycle, keep improvements, revert failures
 
-Each cycle:
-  1. (search mode) Pick a hyperparameter to tweak in train.py
-  2. Claim experiment on Ensue
-  3. Run train.py (5-min training + eval)
-  4. Publish result, insight, and hypothesis to swarm
-  5. Keep or revert the change based on val_bpb
+train.py in the repo is never modified. Search mode uses a temporary copy.
+When a better config is found, it prints the winning settings so you can
+update train.py deliberately.
 """
 
 import argparse
-import copy
 import hashlib
-import json
 import os
 import random
 import re
@@ -53,29 +48,17 @@ SEARCH_SPACE = [
     ("FINAL_LR_FRAC", r"^FINAL_LR_FRAC\s*=\s*([\d.]+)",
      lambda v: [round(x, 3) for x in [0.0, 0.005, 0.01, 0.02, 0.03, 0.05] if x != v]),
     ("WARMDOWN_RATIO", r"^WARMDOWN_RATIO\s*=\s*([\d.]+)",
-     lambda v: [round(x, 2) for x in [0.5, 0.7, 0.8, 0.9, 1.0] if x != v]),
+     lambda v: [round(x, 2) for x in [0.3, 0.5, 0.7, 0.8, 0.9, 1.0] if x != v]),
     ("ASPECT_RATIO", r"^ASPECT_RATIO\s*=\s*(\d+)",
      lambda v: [x for x in [48, 52, 56, 60, 64] if x != v]),
     ("TOTAL_BATCH_SIZE", r"^TOTAL_BATCH_SIZE\s*=.*else\s*2\*\*(\d+)",
      lambda v: [x for x in [14, 15, 16, 17] if x != v]),
 ]
 
-# Track what we've already tried so we don't repeat
 _tried = set()
 
 
-def read_train_py():
-    with open(TRAIN_SCRIPT) as f:
-        return f.read()
-
-
-def write_train_py(source):
-    with open(TRAIN_SCRIPT, "w") as f:
-        f.write(source)
-
-
 def get_current_value(source, param_name, pattern):
-    """Extract current value of a hyperparameter from train.py source."""
     for line in source.split("\n"):
         m = re.match(pattern, line)
         if m:
@@ -84,17 +67,14 @@ def get_current_value(source, param_name, pattern):
 
 
 def apply_tweak(source, param_name, pattern, old_val, new_val):
-    """Replace a hyperparameter value in train.py source. Returns new source."""
     lines = source.split("\n")
     new_lines = []
     for line in lines:
         m = re.match(pattern, line)
         if m:
             if param_name == "TOTAL_BATCH_SIZE":
-                # Special case: replace the exponent in "else 2**N"
                 line = re.sub(r"else\s*2\*\*\d+", f"else 2**{int(new_val)}", line)
             else:
-                # Replace the matched number with the new value
                 old_str = m.group(1)
                 if "." in old_str or "." in str(new_val):
                     new_str = str(float(new_val))
@@ -106,7 +86,6 @@ def apply_tweak(source, param_name, pattern, old_val, new_val):
 
 
 def pick_tweak(source):
-    """Pick a random hyperparameter and a random new value to try."""
     random.shuffle(SEARCH_SPACE)
     for param_name, pattern, candidates_fn in SEARCH_SPACE:
         current = get_current_value(source, param_name, pattern)
@@ -119,7 +98,6 @@ def pick_tweak(source):
             if key not in _tried:
                 _tried.add(key)
                 return param_name, pattern, current, candidate
-    # If we've tried everything, reset and try again
     _tried.clear()
     return pick_tweak(source)
 
@@ -129,7 +107,6 @@ def pick_tweak(source):
 # ---------------------------------------------------------------------------
 
 def parse_train_output(output: str) -> dict:
-    """Extract metrics from train.py's final summary."""
     metrics = {}
     for line in output.strip().split("\n"):
         line = line.strip()
@@ -144,17 +121,17 @@ def parse_train_output(output: str) -> dict:
     return metrics
 
 
-def run_cycle(coord, cycle_num, mode, best_bpb):
-    """Run one train+eval cycle. In search mode, tweak one hyperparameter."""
+def run_cycle(coord, cycle_num, mode, best_bpb, best_source):
+    """Run one train+eval cycle. Returns (result_dict, winning_source_or_None)."""
     run_id = hashlib.md5(f"{time.time()}-{cycle_num}".encode()).hexdigest()[:6]
 
-    original_source = read_train_py()
+    base_source = best_source
     tweak_info = None
+    train_source = base_source
 
     if mode == "search":
-        param_name, pattern, old_val, new_val = pick_tweak(original_source)
-        new_source = apply_tweak(original_source, param_name, pattern, old_val, new_val)
-        write_train_py(new_source)
+        param_name, pattern, old_val, new_val = pick_tweak(base_source)
+        train_source = apply_tweak(base_source, param_name, pattern, old_val, new_val)
         tweak_info = {"param": param_name, "old": old_val, "new": new_val}
         if param_name == "TOTAL_BATCH_SIZE":
             desc = f"{param_name} 2**{int(old_val)}->2**{int(new_val)} (M4 MPS) [{run_id}]"
@@ -162,7 +139,7 @@ def run_cycle(coord, cycle_num, mode, best_bpb):
             desc = f"{param_name} {old_val}->{new_val} (M4 MPS) [{run_id}]"
         print(f"[search] Tweaking: {desc}")
     else:
-        desc = f"baseline MPS run cycle {cycle_num} (seraph config M4) [{run_id}]"
+        desc = f"baseline MPS run cycle {cycle_num} (M4 batch8) [{run_id}]"
 
     print(f"\n{'='*54}")
     print(f"  CYCLE {cycle_num} {'[SEARCH]' if mode == 'search' else '[BASELINE]'}")
@@ -178,18 +155,27 @@ def run_cycle(coord, cycle_num, mode, best_bpb):
         desc = f"{desc} t={int(time.time())}"
         exp_key = coord.claim_experiment(desc)
 
-    # Run training
+    # Write temp copy in the project directory (so imports work)
+    project_dir = os.path.dirname(__file__)
+    tmp_train = os.path.join(project_dir, "_train_experiment.py")
+    with open(tmp_train, "w") as f:
+        f.write(train_source)
+
     print("[swarm] Starting train.py...")
     t0 = time.time()
 
     result = subprocess.run(
-        [sys.executable, TRAIN_SCRIPT],
+        [sys.executable, tmp_train],
         capture_output=True,
         text=True,
-        cwd=os.path.dirname(__file__),
+        cwd=project_dir,
     )
 
     elapsed = time.time() - t0
+    try:
+        os.remove(tmp_train)
+    except OSError:
+        pass
 
     if result.stdout:
         lines = result.stdout.strip().split("\n")
@@ -200,37 +186,29 @@ def run_cycle(coord, cycle_num, mode, best_bpb):
         print(f"[swarm] train.py FAILED (exit {result.returncode})")
         if result.stderr:
             print(result.stderr[-500:])
-        # Revert on failure
-        if mode == "search":
-            print(f"[search] REVERTING {tweak_info['param']} back to {tweak_info['old']}")
-            write_train_py(original_source)
         status = "discard"
         val_bpb = None
+        metrics = {}
     else:
         metrics = parse_train_output(result.stdout)
         val_bpb = metrics.get("val_bpb")
 
         if val_bpb is None:
             print("[swarm] Could not parse val_bpb!")
-            if mode == "search":
-                write_train_py(original_source)
-            return {"status": "parse_error", "elapsed": elapsed}
+            return {"status": "parse_error", "elapsed": elapsed}, None
 
-        # Decide keep or revert
         if mode == "search" and best_bpb is not None and val_bpb >= best_bpb:
-            print(f"[search] {val_bpb:.6f} >= best {best_bpb:.6f} — REVERTING")
-            write_train_py(original_source)
+            print(f"[search] {val_bpb:.6f} >= best {best_bpb:.6f} -- DISCARD")
             status = "discard"
         else:
-            if mode == "search":
-                print(f"[search] {val_bpb:.6f} < best {best_bpb:.6f} — KEEPING!")
+            if mode == "search" and best_bpb is not None:
+                print(f"[search] {val_bpb:.6f} < best {best_bpb:.6f} -- KEEP!")
             status = "keep"
 
         print(f"\n[swarm] {'KEEP' if status == 'keep' else 'DISCARD'} val_bpb = {val_bpb:.6f} in {elapsed:.0f}s")
 
     # Publish to Ensue
     if exp_key and val_bpb is not None:
-        train_source = read_train_py()
         coord.publish_result(
             experiment_key=exp_key,
             val_bpb=val_bpb,
@@ -251,24 +229,25 @@ def run_cycle(coord, cycle_num, mode, best_bpb):
                 "tweak": tweak_info,
             },
         )
-        # Publish insight
         if tweak_info:
             insight = f"{tweak_info['param']} {tweak_info['old']}->{tweak_info['new']}: "
             insight += f"val_bpb={val_bpb:.6f} ({status}). "
             if status == "keep":
-                insight += f"Improved by {best_bpb - val_bpb:.6f} on M4 MPS (33 steps/5min)."
+                insight += f"Improved by {best_bpb - val_bpb:.6f} on M4 MPS (~33 steps/5min)."
             else:
-                insight += f"No improvement on M4 MPS (33 steps/5min)."
+                insight += f"No improvement on M4 MPS (~33 steps/5min)."
             coord.post_insight(insight)
 
         print(f"[swarm] Published to Ensue: {exp_key}")
+
+    winning_source = train_source if status == "keep" else None
 
     return {
         "status": status if val_bpb is not None else "fail",
         "val_bpb": val_bpb,
         "elapsed": elapsed,
         "tweak": tweak_info,
-    }
+    }, winning_source
 
 
 # ---------------------------------------------------------------------------
@@ -292,6 +271,10 @@ def main():
 
     coord.announce()
 
+    # Start from the repo's train.py as baseline
+    with open(TRAIN_SCRIPT) as f:
+        best_source = f.read()
+
     cycle = 1
     results = []
     best_bpb = None
@@ -301,19 +284,23 @@ def main():
             if args.cycles > 0 and cycle > args.cycles:
                 break
 
-            result = run_cycle(coord, cycle, args.mode, best_bpb)
+            result, winning_source = run_cycle(coord, cycle, args.mode, best_bpb, best_source)
             results.append(result)
 
-            # Update best
-            if result.get("val_bpb") is not None and result["status"] == "keep":
+            if winning_source and result.get("val_bpb") is not None:
                 if best_bpb is None or result["val_bpb"] < best_bpb:
                     best_bpb = result["val_bpb"]
+                    best_source = winning_source
+                    if result.get("tweak"):
+                        tw = result["tweak"]
+                        print(f"\n[search] NEW BEST: {best_bpb:.6f}")
+                        print(f"[search] Winning change: {tw['param']} {tw['old']} -> {tw['new']}")
 
             # Summary
-            ok_results = [r for r in results if r.get("val_bpb") is not None]
             keeps = [r for r in results if r["status"] == "keep"]
             discards = [r for r in results if r["status"] == "discard"]
-            print(f"\n[swarm] Cycles: {len(results)} | Keeps: {len(keeps)} | Discards: {len(discards)} | Best: {best_bpb:.6f}" if best_bpb else "")
+            if best_bpb:
+                print(f"\n[swarm] Cycles: {len(results)} | Keeps: {len(keeps)} | Discards: {len(discards)} | Best: {best_bpb:.6f}")
 
             cycle += 1
 
@@ -327,23 +314,20 @@ def main():
         print("\n[swarm] Interrupted. Shutting down.")
 
     # Final summary
-    ok_results = [r for r in results if r.get("val_bpb") is not None]
-    keeps = [r for r in ok_results if r["status"] == "keep"]
+    keeps = [r for r in results if r["status"] == "keep"]
     print(f"\n{'='*54}")
     print(f"  SWARM SESSION COMPLETE")
     print(f"  Cycles: {len(results)} ({len(keeps)} kept, {len(results) - len(keeps)} discarded)")
     if best_bpb:
         print(f"  Best val_bpb: {best_bpb:.6f}")
-    if ok_results:
+    if results:
         print(f"  Total time: {sum(r['elapsed'] for r in results):.0f}s")
     if keeps:
-        print(f"  Improvements kept:")
+        print(f"\n  To apply the best config, update train.py with these changes:")
         for r in keeps:
             tw = r.get("tweak")
             if tw:
-                print(f"    {tw['param']} {tw['old']}->{tw['new']}: {r['val_bpb']:.6f}")
-            else:
-                print(f"    baseline: {r['val_bpb']:.6f}")
+                print(f"    {tw['param']}: {tw['old']} -> {tw['new']} (val_bpb={r['val_bpb']:.6f})")
     print(f"{'='*54}")
 
 
