@@ -46,7 +46,7 @@ def run_cycle(coord: Coordinator, cycle_num: int) -> dict:
     """Run one train+eval cycle and publish results."""
     import hashlib
     run_id = hashlib.md5(f"{time.time()}-{cycle_num}".encode()).hexdigest()[:6]
-    desc = f"baseline MPS run cycle {cycle_num} (float32 batch4 M4) [{run_id}]"
+    desc = f"baseline MPS run cycle {cycle_num} (float32 batch8 M4) [{run_id}]"
     
     print(f"\n{'='*54}")
     print(f"  CYCLE {cycle_num}")

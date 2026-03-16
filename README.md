@@ -1,67 +1,82 @@
-# autoresearch-at-home — Apple Silicon (MPS) Fork
+# autoresearch-at-home — Apple Silicon Fork
 
-This fork adds **Apple Silicon support** to [autoresearch-at-home](https://github.com/mutable-state-inc/autoresearch-at-home), letting you run collaborative AI training on any Mac with an M-series chip.
-
-The original project is CUDA-only. We patched `train.py` and `prepare.py` so everything auto-detects MPS vs CUDA at startup — no manual config needed.
-
-## Benchmark (Mac mini M4, 10-core GPU, 16GB)
-
-| Metric | This fork (MPS) | Original (H100) |
-|--------|----------------|-----------------|
-| Steps in 5 min | 100 | ~1,500+ |
-| Final loss | 5.33 | ~1.8 |
-| Throughput | ~4,800 tok/sec | ~500K+ tok/sec |
-| Time per step | ~3.4s | ~0.2s |
-
-~100x slower than H100 — inherent hardware gap (no Flash Attention 3, no `torch.compile` on MPS). But it **works**, and that's the point.
+Fork of [autoresearch-at-home](https://github.com/mutable-state-inc/autoresearch-at-home) that runs on **Mac with Apple Silicon**. The original is CUDA-only. This fork auto-detects MPS vs CUDA at startup — no config needed, and all CUDA paths are untouched.
 
 ## Quick start
 
 ```bash
 git clone https://github.com/bdecrem/autoresearch-at-home.git
 cd autoresearch-at-home
-uv sync           # install deps
-uv run prepare.py # download data + train tokenizer
-uv run train.py   # auto-detects MPS, trains for 5 minutes
+uv sync
+uv run prepare.py          # download data + train tokenizer (~5 min)
+uv run train.py            # single 5-minute training run
 ```
 
-No CUDA required. No config changes. Just clone and run.
+To run multiple cycles with swarm coordination:
 
-## What we changed
-
-All changes are conditional — CUDA paths are untouched when running on NVIDIA GPUs.
-
-- **Device auto-detection**: MPS → CUDA → CPU fallback at startup
-- **Flash Attention 3 → PyTorch SDPA**: FA3 is CUDA-only; we use `F.scaled_dot_product_attention` on MPS
-- **float32 instead of bfloat16**: MPS bfloat16 is unstable; float32 runs natively without conversion overhead
-- **No `torch.compile`**: Not yet supported on MPS backend
-- **Batch size 4** (vs 64 on CUDA): Fits in 16GB unified memory
-- **Total batch 16K tokens** (vs 524K): Adjusted for smaller per-device batch
-- **Reduced eval tokens**: 10×524K (vs 40×524K) for faster eval passes
-- **`PYTORCH_MPS_HIGH_WATERMARK_RATIO=0.0`**: Lets MPS use all available memory
-- **Device-aware dataloader**: Conditional `pin_memory`, device buffer allocation
-- **Fixed sync/memory calls**: `torch.mps.synchronize()` and `torch.mps.driver_allocated_memory()`
+```bash
+uv run python run_swarm.py --cycles 5 --agent-id my-mac
+```
 
 ## Requirements
 
 - macOS with Apple Silicon (M1/M2/M3/M4)
-- At least 16GB unified memory
+- 16GB+ unified memory
 - Python 3.10+
-- PyTorch 2.1+ (ships with MPS backend)
+- [uv](https://docs.astral.sh/uv/) package manager
+
+## Benchmark (Mac mini M4, 10-core GPU, 16GB)
+
+| Metric | This fork (MPS) | Original (H100) |
+|--------|----------------|-----------------|
+| Steps in 5 min | 23 | ~1,500+ |
+| val_bpb | 2.01 | ~1.8 |
+| Throughput | ~2,700 tok/sec | ~500K+ tok/sec |
+| Peak memory | 4.1 GB | varies |
+| Startup time | ~10 min | ~30s |
+
+~60x slower than H100 — inherent hardware gap. But it works, reports real metrics, and participates in the swarm.
+
+## What changed from upstream
+
+- **Device auto-detection**: MPS → CUDA → CPU fallback
+- **FA3 → PyTorch SDPA**: Flash Attention 3 is CUDA-only; we use `F.scaled_dot_product_attention` on MPS
+- **float32 precision**: MPS float16/bfloat16 is unstable for this workload
+- **`torch.compile` with `aot_eager`**: Works on MPS, cuts startup from hours to minutes
+- **Batch size 8, total batch 64K tokens**: Tuned for 16GB unified memory
+- **`kernels` dependency skipped on macOS**: CUDA-only package, breaks `uv sync` on Mac
+- **MPS memory reporting**: `peak_vram_mb` now reports actual usage via `torch.mps.driver_allocated_memory()`
+- **VRAM tier detection**: Apple Silicon detected via system RAM for swarm leaderboard
 
 ## Project structure
 
 ```
-train.py        — model, optimizer, training loop (MPS + CUDA)
-prepare.py      — data prep + tokenizer (MPS + CUDA)
-coordinator.py  — Ensue integration for the research swarm
-pyproject.toml  — dependencies (uses default PyPI torch for Mac compatibility)
+train.py        — model, optimizer, training loop (the file you modify for experiments)
+prepare.py      — data download + tokenizer training (run once, don't modify)
+coordinator.py  — Ensue swarm coordination (claiming, publishing, leaderboard)
+run_swarm.py    — automated loop: train → publish → repeat
+setup_hub.py    — one-time Ensue hub initialization (admin only)
+program.md      — experiment protocol and loop guidelines
+collab.md       — collaborative swarm coordination protocol
+pyproject.toml  — dependencies
 ```
+
+## Swarm participation
+
+To join the collaborative research swarm:
+
+1. Get an API key from the hub admin
+2. Save it: `echo "your-key" > .autoresearch-key`
+3. Run: `uv run python run_swarm.py --cycles 5 --agent-id your-name`
+
+Results are published to the shared Ensue network. See [collab.md](collab.md) for the full protocol.
+
+## Troubleshooting
+
+- **MPS deadlock** (0% CPU, high memory): Kill the process and restart. This is a known PyTorch MPS issue.
+- **`kernels` install error**: Should not happen on this fork — the dependency is skipped on macOS. If it does, run `uv sync` again.
+- **Out of memory**: Reduce `DEVICE_BATCH_SIZE` in train.py (default 8, try 4).
 
 ---
 
-*For the original project, CUDA setup, and collaborative swarm protocol, see the [upstream repo](https://github.com/mutable-state-inc/autoresearch-at-home).*
-
-## License
-
-MIT
+*Upstream: [mutable-state-inc/autoresearch-at-home](https://github.com/mutable-state-inc/autoresearch-at-home) — MIT License*
